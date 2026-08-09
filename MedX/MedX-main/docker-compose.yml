@@ -1,0 +1,75 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: medx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medx_dev}
+      POSTGRES_DB: medx
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once on an empty volume. Re-run with `docker compose down -v`.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medx -d medx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://medx:${POSTGRES_PASSWORD:-medx_dev}@db:5432/medx
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      MODEL_DIR: /app/models/current
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - ./models:/app/models:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: celery -A workers.tasks worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+psycopg://medx:${POSTGRES_PASSWORD:-medx_dev}@db:5432/medx
+      REDIS_URL: redis://redis:6379/0
+      MODEL_DIR: /app/models/current
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - ./models:/app/models:ro
+
+  beat:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: celery -A workers.tasks beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg://medx:${POSTGRES_PASSWORD:-medx_dev}@db:5432/medx
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
